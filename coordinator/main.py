@@ -1,6 +1,7 @@
-"""Coordinator service: FastAPI endpoints over database layer."""
+"""Coordinator service: API + background sweeper."""
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -8,7 +9,16 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from coordinator.db import claim_job, complete_job, create_job, get_job, init_db
+from coordinator.db import (
+    claim_job,
+    complete_job,
+    create_job,
+    fail_job,
+    get_job,
+    heartbeat,
+    init_db,
+    requeue_expired,
+)
 
 
 def get_db_path() -> str:
@@ -16,11 +26,34 @@ def get_db_path() -> str:
     return os.getenv("DB_PATH", "jobs.db")
 
 
+def sweeper_loop(stop_event: threading.Event, sweep_secs: float, db_path: str):
+    """Background thread loop that periodically sweeps and requeues expired jobs."""
+    while not stop_event.is_set():
+        if stop_event.wait(sweep_secs):
+            break
+        try:
+            requeue_expired(db_path=db_path)
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initializes database schema on startup."""
-    init_db(get_db_path())
+    """Initializes schema and starts sweeper background thread."""
+    db_path = get_db_path()
+    init_db(db_path)
+
+    sweep_secs = float(os.getenv("SWEEP_SECS", "2"))
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=sweeper_loop,
+        args=(stop_event, sweep_secs, db_path),
+        daemon=True,
+    )
+    thread.start()
     yield
+    stop_event.set()
+    thread.join(timeout=1.0)
 
 
 app = FastAPI(title="Task Coordinator", lifespan=lifespan)
@@ -38,6 +71,17 @@ class ClaimRequest(BaseModel):
 class CompleteJobRequest(BaseModel):
     worker_id: Optional[str] = None
     attempt: Optional[int] = None
+
+
+class HeartbeatRequest(BaseModel):
+    worker_id: str
+    attempt: int
+
+
+class FailJobRequest(BaseModel):
+    worker_id: str
+    attempt: int
+    error: str
 
 
 @app.post("/jobs")
@@ -93,3 +137,30 @@ def complete_endpoint(id: int, body: CompleteJobRequest):
         db_path=get_db_path(),
     )
     return {"updated": updated}
+
+
+@app.post("/jobs/{id}/heartbeat")
+def heartbeat_endpoint(id: int, body: HeartbeatRequest):
+    """Extends the lease of a running job."""
+    lease_secs = float(os.getenv("LEASE_SECS", "30"))
+    extended = heartbeat(
+        job_id=id,
+        worker_id=body.worker_id,
+        attempt=body.attempt,
+        lease_secs=lease_secs,
+        db_path=get_db_path(),
+    )
+    return {"extended": extended}
+
+
+@app.post("/jobs/{id}/fail")
+def fail_endpoint(id: int, body: FailJobRequest):
+    """Reports a job failure from a worker."""
+    failed = fail_job(
+        job_id=id,
+        worker_id=body.worker_id,
+        attempt=body.attempt,
+        error=body.error,
+        db_path=get_db_path(),
+    )
+    return {"failed": failed}
