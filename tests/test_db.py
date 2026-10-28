@@ -46,7 +46,7 @@ class TestDatabaseLayer(unittest.TestCase):
 
         # Enqueue 10 distinct jobs
         job_ids = [
-            create_job(f"key-{i}", "count_words", f"payload-{i}", db_path=self.db_path)
+            create_job(f"key-{i}", "count_words", f"payload-{i}", db_path=self.db_path)[0]
             for i in range(num_jobs)
         ]
         self.assertEqual(len(job_ids), num_jobs)
@@ -80,10 +80,12 @@ class TestDatabaseLayer(unittest.TestCase):
     def test_create_job_idempotency(self):
         """create_job twice with the same key returns one id and one row."""
         key = "idem-key-duplicate-check"
-        id1 = create_job(key, "count_words", "sample payload 1", db_path=self.db_path)
-        id2 = create_job(key, "count_words", "sample payload 2", db_path=self.db_path)
+        id1, created1 = create_job(key, "count_words", "sample payload 1", db_path=self.db_path)
+        id2, created2 = create_job(key, "count_words", "sample payload 2", db_path=self.db_path)
 
         self.assertEqual(id1, id2)
+        self.assertTrue(created1)
+        self.assertFalse(created2)
 
         conn = get_connection(self.db_path)
         cursor = conn.cursor()
@@ -93,7 +95,7 @@ class TestDatabaseLayer(unittest.TestCase):
 
     def test_complete_job_twice(self):
         """complete_job called twice on the same job. The second call changes nothing."""
-        job_id = create_job("complete-test-key", "count_words", "payload", db_path=self.db_path)
+        job_id, _ = create_job("complete-test-key", "count_words", "payload", db_path=self.db_path)
         claimed = claim_job("worker-test", lease_secs=30.0, db_path=self.db_path)
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["id"], job_id)
@@ -114,7 +116,7 @@ class TestDatabaseLayer(unittest.TestCase):
 
     def test_claim_increments_attempts(self):
         """claim_job increments attempts by 1."""
-        job_id = create_job("attempt-test-key", "count_words", "payload", db_path=self.db_path)
+        job_id, _ = create_job("attempt-test-key", "count_words", "payload", db_path=self.db_path)
 
         conn = get_connection(self.db_path)
         cursor = conn.cursor()

@@ -3,7 +3,7 @@
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 DEFAULT_DB_PATH = "jobs.db"
 _local = threading.local()
@@ -72,8 +72,12 @@ def create_job(
     type: str,
     payload: str,
     db_path: str = DEFAULT_DB_PATH,
-) -> int:
-    """Inserts a job. If idem_key exists, returns the existing job id."""
+) -> Tuple[int, bool]:
+    """Inserts a job.
+
+    Returns (job_id, created) where created is True if newly inserted,
+    or False if idem_key already existed.
+    """
     conn = get_connection(db_path)
     init_db(db_path)
     now = time.time()
@@ -87,11 +91,21 @@ def create_job(
         (idem_key, type, payload, now, now, now),
     )
     if cursor.rowcount > 0:
-        return cursor.lastrowid
+        return cursor.lastrowid, True
 
     cursor.execute("SELECT id FROM jobs WHERE idem_key = ?;", (idem_key,))
     row = cursor.fetchone()
-    return row["id"]
+    return row["id"], False
+
+
+def get_job(job_id: int, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
+    """Fetches a single job row by ID, or None if not found."""
+    conn = get_connection(db_path)
+    init_db(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM jobs WHERE id = ?;", (job_id,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
 
 
 def claim_job(
