@@ -6,10 +6,13 @@ from typing import Any, Callable, Dict
 
 
 def count_words(payload: str, job_id: int) -> int:
-    """Deterministic word counter handler.
+    """Deterministic word counter handler."""
+    if os.getenv("CRASH_AT") == "mid_job":
+        os._exit(1)
 
-    Counts words in payload (or file path if existing) and writes count to outputs/{job_id}.txt.
-    """
+    output_dir = os.getenv("OUTPUTS_DIR", "outputs")
+    os.makedirs(output_dir, exist_ok=True)
+
     if os.path.exists(payload):
         with open(payload, "r", encoding="utf-8") as f:
             text = f.read()
@@ -17,25 +20,38 @@ def count_words(payload: str, job_id: int) -> int:
         text = payload
 
     word_count = len(text.split())
-    os.makedirs("outputs", exist_ok=True)
-    with open(os.path.join("outputs", f"{job_id}.txt"), "w", encoding="utf-8") as f:
+    out_file = os.path.join(output_dir, f"{job_id}.txt")
+    with open(out_file, "w", encoding="utf-8") as f:
         f.write(str(word_count))
     return word_count
 
 
 def sleep_handler(payload: str, job_id: int) -> str:
     """Sleep handler for testing fault injection, timeouts, and process kill."""
-    secs = float(payload) if payload else 10.0
+    if os.getenv("CRASH_AT") == "mid_job":
+        os._exit(1)
+
+    default_sleep = float(os.getenv("JOB_SLEEP", "10"))
+    secs = float(payload) if (payload and payload.strip()) else default_sleep
     time.sleep(secs)
-    os.makedirs("outputs", exist_ok=True)
-    with open(os.path.join("outputs", f"{job_id}.txt"), "w", encoding="utf-8") as f:
+
+    output_dir = os.getenv("OUTPUTS_DIR", "outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    out_file = os.path.join(output_dir, f"{job_id}.txt")
+    with open(out_file, "w", encoding="utf-8") as f:
         f.write("done")
     return "done"
+
+
+def always_crash(payload: str, job_id: int):
+    """Handler that immediately crashes via os._exit(1)."""
+    os._exit(1)
 
 
 HANDLERS: Dict[str, Callable[[str, int], Any]] = {
     "count_words": count_words,
     "sleep": sleep_handler,
+    "always_crash": always_crash,
 }
 
 

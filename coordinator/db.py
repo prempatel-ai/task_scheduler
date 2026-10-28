@@ -112,6 +112,25 @@ def get_job(job_id: int, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, A
     return dict(row) if row else None
 
 
+def get_job_by_idem_key(idem_key: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
+    """Fetches a single job row by idempotency key, or None if not found."""
+    conn = get_connection(db_path)
+    init_db(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM jobs WHERE idem_key = ?;", (idem_key,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_queue_depth(db_path: str = DEFAULT_DB_PATH) -> int:
+    """Returns the number of currently queued jobs (excluding running)."""
+    conn = get_connection(db_path)
+    init_db(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'queued';")
+    return cursor.fetchone()["cnt"]
+
+
 def claim_job(
     worker_id: str,
     lease_secs: float,
@@ -242,7 +261,7 @@ def heartbeat(
 
 def requeue_expired(
     now: Optional[float] = None,
-    base_backoff: float = 2.0,
+    base_backoff: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> int:
     """Requeues or fails expired running jobs in a single atomic transaction.
@@ -256,6 +275,8 @@ def requeue_expired(
     init_db(db_path)
     if now is None:
         now = time.time()
+    if base_backoff is None:
+        base_backoff = float(os.getenv("BASE_BACKOFF", "2.0"))
 
     conn.execute("BEGIN IMMEDIATE;")
     try:
@@ -314,7 +335,7 @@ def fail_job(
     attempt: int,
     error: str,
     now: Optional[float] = None,
-    base_backoff: float = 2.0,
+    base_backoff: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> bool:
     """Handles explicit job failure reported by a worker.
@@ -326,6 +347,8 @@ def fail_job(
     init_db(db_path)
     if now is None:
         now = time.time()
+    if base_backoff is None:
+        base_backoff = float(os.getenv("BASE_BACKOFF", "2.0"))
 
     conn.execute("BEGIN IMMEDIATE;")
     try:

@@ -15,6 +15,8 @@ from coordinator.db import (
     create_job,
     fail_job,
     get_job,
+    get_job_by_idem_key,
+    get_queue_depth,
     heartbeat,
     init_db,
     requeue_expired,
@@ -89,15 +91,35 @@ def create_job_endpoint(
     body: CreateJobRequest,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
-    """Submits a new job or returns an existing one for duplicate idempotency keys."""
+    """Submits a new job or returns an existing one for duplicate idempotency keys.
+
+    If queue depth >= MAX_QUEUE for a new key, returns 429 with Retry-After.
+    """
     if not idempotency_key or not idempotency_key.strip():
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
 
+    db_path = get_db_path()
+
+    # 1. Known key returns 200 even if the queue is full (client retry is never rejected)
+    existing = get_job_by_idem_key(idempotency_key, db_path=db_path)
+    if existing:
+        return JSONResponse(status_code=200, content={"job_id": existing["id"]})
+
+    # 2. Check queue depth against MAX_QUEUE (queued only, not running)
+    max_queue = int(os.getenv("MAX_QUEUE", "100"))
+    if get_queue_depth(db_path=db_path) >= max_queue:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": "5"},
+            content={"detail": "Queue is full, try later"},
+        )
+
+    # 3. Insert new job
     job_id, created = create_job(
         idem_key=idempotency_key,
         type=body.type,
         payload=body.payload,
-        db_path=get_db_path(),
+        db_path=db_path,
     )
     status_code = 201 if created else 200
     return JSONResponse(status_code=status_code, content={"job_id": job_id})
