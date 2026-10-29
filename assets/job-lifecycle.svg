@@ -81,29 +81,25 @@
   <!-- Queued -->
   <g id="state-queued">
     <rect class="pq" x="60" y="168" width="140" height="44" rx="22"/>
-    <circle cx="82" cy="190" r="4.5" fill="#d97706"/>
-    <text class="t" x="135" y="195" text-anchor="middle">queued</text>
+    <text class="t" x="130" y="195" text-anchor="middle">queued</text>
   </g>
 
   <!-- Running -->
   <g id="state-running">
     <rect class="pr" x="380" y="168" width="140" height="44" rx="22"/>
-    <circle cx="402" cy="190" r="4.5" fill="#0284c7"/>
-    <text class="t" x="455" y="195" text-anchor="middle">running</text>
+    <text class="t" x="450" y="195" text-anchor="middle">running</text>
   </g>
 
   <!-- Completed -->
   <g id="state-completed">
     <rect class="pc" x="780" y="90" width="140" height="44" rx="22"/>
-    <circle cx="802" cy="112" r="4.5" fill="#16a34a"/>
-    <text class="t" x="855" y="117" text-anchor="middle">completed</text>
+    <text class="t" x="850" y="117" text-anchor="middle">completed</text>
   </g>
 
   <!-- Failed -->
   <g id="state-failed">
     <rect class="pf" x="780" y="246" width="140" height="44" rx="22"/>
-    <circle cx="802" cy="268" r="4.5" fill="#dc2626"/>
-    <text class="t" x="855" y="273" text-anchor="middle">failed</text>
+    <text class="t" x="850" y="273" text-anchor="middle">failed</text>
   </g>
 
   <!-- Claim Transition -->

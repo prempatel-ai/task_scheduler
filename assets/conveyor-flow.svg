@@ -220,11 +220,8 @@
   <!-- Worker 1 Machine Unit -->
   <g id="worker-1" transform="translate(425, 230)">
     <rect class="panel" x="0" y="0" width="105" height="54" rx="8"/>
-    <text class="mono-text" x="52" y="22" text-anchor="middle" fill="#0f172a">WORKER 1</text>
-    
-    <!-- Clean Solid Indicator Dot (No expanding fuzzy circles) -->
-    <circle cx="88" cy="14" r="3.5" fill="#0284c7" class="dot-worker"/>
-    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="38" text-anchor="middle">heartbeat</text>
+    <text class="mono-text" x="52" y="24" text-anchor="middle" fill="#0f172a">WORKER 1</text>
+    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="40" text-anchor="middle">heartbeat</text>
 
     <!-- Animated Mechanical Gripper Arm -->
     <g class="gripper-arm-1" transform="translate(46, 54)">
@@ -236,11 +233,8 @@
   <!-- Worker 2 Machine Unit -->
   <g id="worker-2" transform="translate(615, 230)">
     <rect class="panel" x="0" y="0" width="105" height="54" rx="8"/>
-    <text class="mono-text" x="52" y="22" text-anchor="middle" fill="#0f172a">WORKER 2</text>
-    
-    <!-- Clean Solid Indicator Dot -->
-    <circle cx="88" cy="14" r="3.5" fill="#0284c7" class="dot-worker" style="animation-delay: -0.7s;"/>
-    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="38" text-anchor="middle">heartbeat</text>
+    <text class="mono-text" x="52" y="24" text-anchor="middle" fill="#0f172a">WORKER 2</text>
+    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="40" text-anchor="middle">heartbeat</text>
 
     <!-- Animated Mechanical Gripper Arm -->
     <g class="gripper-arm-2" transform="translate(46, 54)">
@@ -269,16 +263,14 @@
       <text class="note-text" x="75" y="103" text-anchor="middle" fill="#16a34a">first result wins</text>
     </g>
 
-    <!-- Status Outcome Badges (Padded 150px box, centered text, clean solid dots) -->
+    <!-- Status Outcome Badges (Padded 150px box, centered text, clean) -->
     <g transform="translate(0, 170)">
       <rect x="0" y="0" width="150" height="30" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.3"/>
-      <circle cx="18" cy="15" r="4.5" fill="#16a34a"/>
-      <text class="mono-text" x="80" y="19" text-anchor="middle" fill="#16a34a">COMPLETED</text>
+      <text class="mono-text" x="75" y="19" text-anchor="middle" fill="#16a34a">COMPLETED</text>
     </g>
     <g transform="translate(0, 208)">
       <rect x="0" y="0" width="150" height="30" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1.3"/>
-      <circle cx="18" cy="15" r="4.5" fill="#dc2626"/>
-      <text class="mono-text" x="80" y="19" text-anchor="middle" fill="#dc2626">FAILED (3 tries)</text>
+      <text class="mono-text" x="75" y="19" text-anchor="middle" fill="#dc2626">FAILED (3 tries)</text>
     </g>
   </g>
 </svg>

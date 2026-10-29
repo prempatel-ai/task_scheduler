@@ -87,7 +87,6 @@
   <!-- Client -->
   <g id="client-node">
     <rect class="box" x="30" y="62" width="130" height="70" rx="10"/>
-    <circle cx="48" cy="80" r="4" fill="#0284c7"/>
     <text class="t" x="95" y="92" text-anchor="middle">Client</text>
     <text class="s" x="95" y="112" text-anchor="middle">submits jobs</text>
   </g>
@@ -95,8 +94,7 @@
   <!-- Coordinator -->
   <g id="coordinator-zone">
     <rect class="zone" x="290" y="30" width="420" height="300" rx="14"/>
-    <circle cx="310" cy="52" r="4" fill="#16a34a"/>
-    <text class="z" x="322" y="56">COORDINATOR (FASTAPI)</text>
+    <text class="z" x="310" y="56">COORDINATOR (FASTAPI)</text>
 
     <!-- HTTP API -->
     <rect class="box" x="315" y="65" width="370" height="64" rx="10"/>
@@ -106,7 +104,6 @@
     <!-- Sweeper -->
     <g transform="translate(0, 0)">
       <rect class="box" x="315" y="215" width="150" height="76" rx="10"/>
-      <circle cx="332" cy="235" r="4.5" fill="#d97706"/>
       <text class="t" x="390" y="243" text-anchor="middle">Sweeper</text>
       <text class="s" x="390" y="262" text-anchor="middle">finds expired leases</text>
       <text class="s" x="390" y="278" text-anchor="middle">and requeues them</text>
@@ -139,7 +136,6 @@
   <!-- Workers -->
   <g id="worker-a">
     <rect class="box" x="790" y="45" width="140" height="76" rx="10"/>
-    <circle cx="808" cy="64" r="4.5" fill="#0284c7"/>
     <text class="t" x="860" y="74" text-anchor="middle">Worker A</text>
     <text class="s" x="860" y="92" text-anchor="middle">pulls jobs</text>
     <text class="s" x="860" y="108" text-anchor="middle">reports results</text>
@@ -147,7 +143,6 @@
 
   <g id="worker-b">
     <rect class="box" x="790" y="212" width="140" height="76" rx="10"/>
-    <circle cx="808" cy="231" r="4.5" fill="#0284c7"/>
     <text class="t" x="860" y="241" text-anchor="middle">Worker B</text>
     <text class="s" x="860" y="259" text-anchor="middle">pulls jobs</text>
     <text class="s" x="860" y="275" text-anchor="middle">reports results</text>
