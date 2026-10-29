@@ -72,7 +72,7 @@ With no tokens configured, the API is open. For a setup with tokens and HTTPS, s
 ## How it works
 
 <p align="center">
-  <img src="assets/overview.jpg" alt="Task queue conveyor overview: submit job, coordinator, workers, and result store." width="100%">
+  <img src="assets/conveyor-flow.svg" alt="Animated task queue conveyor workflow: submit job, coordinator, workers with heartbeats, and result store." width="100%">
 </p>
 
 Two workers share a pile of jobs. Here is what happens when one of them dies.

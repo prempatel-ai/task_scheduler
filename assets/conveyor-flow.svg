@@ -1,0 +1,284 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 440" width="1060" height="440" role="img" aria-labelledby="title desc">
+  <title id="title">Crash-Resilient Task Queue Conveyor Workflow</title>
+  <desc id="desc">Animated conveyor belt showing job submission, coordinator assignment with leases, workers processing with heartbeats, and atomic first-result-wins completion in crisp light theme.</desc>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; stroke: #e2e8f0; }
+      .panel { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .inner-box { fill: #ffffff; stroke: #e2e8f0; stroke-width: 1; }
+      
+      .title-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 700; fill: #0f172a; }
+      .body-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #475569; }
+      .mono-text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; font-weight: 600; }
+      .note-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 10.5px; fill: #64748b; }
+
+      /* Crisp Conveyor track motion */
+      .belt-track { stroke: #334155; stroke-width: 22; stroke-linecap: round; }
+      .belt-dash {
+        stroke: #94a3b8;
+        stroke-width: 2.5;
+        stroke-dasharray: 8 6;
+        animation: runBelt 1.2s linear infinite;
+      }
+      
+      /* Conveyor parcels motion */
+      .box-parcel-1 { animation: moveBox 9s linear infinite; }
+      .box-parcel-2 { animation: moveBox 9s linear infinite; animation-delay: -3s; }
+      .box-parcel-3 { animation: moveBox 9s linear infinite; animation-delay: -6s; }
+
+      /* Robot arms motion */
+      .gripper-arm-1 { animation: armMotion 2.2s ease-in-out infinite alternate; }
+      .gripper-arm-2 { animation: armMotion 2.2s ease-in-out infinite alternate; animation-delay: -1.1s; }
+
+      /* Crisp status dots (clean opacity pulse, zero fuzzy shadows or halos) */
+      .dot-queued { animation: blinkLight 2.4s ease-in-out infinite; }
+      .dot-running { animation: blinkLight 1.8s ease-in-out infinite; }
+      .dot-completed { animation: blinkLight 2.2s ease-in-out infinite; }
+      .dot-failed { animation: blinkLight 2.8s ease-in-out infinite; }
+      .dot-worker { animation: blinkWorker 1.5s ease-in-out infinite; }
+
+      @keyframes runBelt {
+        from { stroke-dashoffset: 28; }
+        to { stroke-dashoffset: 0; }
+      }
+      @keyframes moveBox {
+        0% { transform: translateX(0px); opacity: 0; }
+        5% { opacity: 1; }
+        92% { opacity: 1; }
+        100% { transform: translateX(640px); opacity: 0; }
+      }
+      @keyframes armMotion {
+        0% { transform: translateY(0px); }
+        50% { transform: translateY(6px); }
+        100% { transform: translateY(0px); }
+      }
+      @keyframes blinkLight {
+        0%, 100% { opacity: 0.5; }
+        50% { opacity: 1; }
+      }
+      @keyframes blinkWorker {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 1; }
+      }
+    </style>
+
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0284c7"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <!-- Crisp Light Canvas -->
+  <rect class="bg" x="0.5" y="0.5" width="1059" height="439" rx="16"/>
+
+  <!-- ==================== STAGE 1: SUBMIT JOB ==================== -->
+  <g id="stage-submit" transform="translate(24, 40)">
+    <!-- Stage Header Badge -->
+    <circle cx="16" cy="16" r="14" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+    <text class="title-text" x="16" y="21" text-anchor="middle" fill="#0284c7">1</text>
+    <text class="title-text" x="38" y="21">Submit job</text>
+    
+    <text class="body-text" x="38" y="44">• Send file or payload</text>
+    <text class="body-text" x="38" y="62">• Coordinator returns ID</text>
+    <text class="body-text" x="38" y="80">• Header: Idempotency-Key</text>
+    <text class="note-text" x="46" y="98" fill="#0284c7">(same key → same job ID)</text>
+
+    <!-- Laptop Desk Graphic -->
+    <g transform="translate(10, 140)">
+      <!-- Desk Table -->
+      <path d="M0 135 H150" stroke="#cbd5e1" stroke-width="2"/>
+      <line x1="15" y1="135" x2="15" y2="165" stroke="#94a3b8" stroke-width="2.5"/>
+      <line x1="135" y1="135" x2="135" y2="165" stroke="#94a3b8" stroke-width="2.5"/>
+      
+      <!-- Laptop Base & Screen -->
+      <rect x="25" y="122" width="100" height="9" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.2"/>
+      <polygon points="35,122 45,55 105,55 115,122" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+      <polygon points="39,118 47,60 103,60 111,118" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1"/>
+      
+      <!-- Submit Button on Screen -->
+      <rect x="55" y="75" width="40" height="22" rx="4" fill="#0284c7"/>
+      <text x="75" y="89" font-family="-apple-system, sans-serif" font-size="8" font-weight="700" fill="#ffffff" text-anchor="middle">SUBMIT</text>
+      
+      <!-- Generated Job ID Tag -->
+      <rect x="35" y="142" width="80" height="22" rx="5" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="3 2"/>
+      <text class="mono-text" x="75" y="157" fill="#0284c7" text-anchor="middle">job_id: 1</text>
+    </g>
+
+    <!-- Flow Arrow: Laptop to Conveyor Start -->
+    <path d="M140 255 C165 255, 175 285, 195 295" fill="none" stroke="#0284c7" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-blue)"/>
+  </g>
+
+  <!-- ==================== CONVEYOR TRACK ASSEMBLY ==================== -->
+  <g id="conveyor-track" transform="translate(225, 290)">
+    <!-- Supporting Metal Legs -->
+    <rect x="40" y="20" width="12" height="75" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+    <rect x="230" y="20" width="12" height="75" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+    <rect x="420" y="20" width="12" height="75" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+    <rect x="610" y="20" width="12" height="75" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+    
+    <!-- Leg Base Feet -->
+    <rect x="30" y="95" width="32" height="7" rx="2" fill="#64748b"/>
+    <rect x="220" y="95" width="32" height="7" rx="2" fill="#64748b"/>
+    <rect x="410" y="95" width="32" height="7" rx="2" fill="#64748b"/>
+    <rect x="600" y="95" width="32" height="7" rx="2" fill="#64748b"/>
+
+    <!-- Main Belt Track Frame -->
+    <line class="belt-track" x1="15" y1="15" x2="655" y2="15"/>
+    
+    <!-- Running Animated Dashed Belts -->
+    <line class="belt-dash" x1="20" y1="9" x2="650" y2="9"/>
+    <line class="belt-dash" x1="20" y1="21" x2="650" y2="21" style="animation-direction: reverse;"/>
+
+    <!-- Rollers -->
+    <circle cx="20" cy="15" r="7" fill="#64748b"/>
+    <circle cx="100" cy="15" r="7" fill="#64748b"/>
+    <circle cx="180" cy="15" r="7" fill="#64748b"/>
+    <circle cx="260" cy="15" r="7" fill="#64748b"/>
+    <circle cx="340" cy="15" r="7" fill="#64748b"/>
+    <circle cx="420" cy="15" r="7" fill="#64748b"/>
+    <circle cx="500" cy="15" r="7" fill="#64748b"/>
+    <circle cx="580" cy="15" r="7" fill="#64748b"/>
+    <circle cx="650" cy="15" r="7" fill="#64748b"/>
+
+    <!-- Moving Parcels (Crisp Light Box) -->
+    <g class="box-parcel-1" transform="translate(15, -28)">
+      <rect x="0" y="0" width="38" height="32" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="19" y1="0" x2="19" y2="32" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="0" y1="16" x2="38" y2="16" stroke="#d97706" stroke-width="1.5"/>
+      <circle cx="19" cy="16" r="3" fill="#b45309"/>
+    </g>
+    <g class="box-parcel-2" transform="translate(15, -28)">
+      <rect x="0" y="0" width="38" height="32" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="19" y1="0" x2="19" y2="32" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="0" y1="16" x2="38" y2="16" stroke="#d97706" stroke-width="1.5"/>
+      <circle cx="19" cy="16" r="3" fill="#b45309"/>
+    </g>
+    <g class="box-parcel-3" transform="translate(15, -28)">
+      <rect x="0" y="0" width="38" height="32" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="19" y1="0" x2="19" y2="32" stroke="#d97706" stroke-width="1.5"/>
+      <line x1="0" y1="16" x2="38" y2="16" stroke="#d97706" stroke-width="1.5"/>
+      <circle cx="19" cy="16" r="3" fill="#b45309"/>
+    </g>
+  </g>
+
+  <!-- ==================== STAGE 2: COORDINATOR ==================== -->
+  <g id="stage-coordinator" transform="translate(290, 25)">
+    <!-- Stage Header Badge -->
+    <circle cx="16" cy="16" r="14" fill="#fef3c7" stroke="#fde68a" stroke-width="1.5"/>
+    <text class="title-text" x="16" y="21" text-anchor="middle" fill="#d97706">2</text>
+    <text class="title-text" x="38" y="21">Coordinator</text>
+    
+    <text class="body-text" x="38" y="44">• Stores job status in SQLite</text>
+    <text class="body-text" x="38" y="62">• Assigns jobs with timed leases</text>
+    <text class="body-text" x="38" y="80">• Sweeper detects dead workers</text>
+    <text class="body-text" x="38" y="98">• Retries with backoff + jitter</text>
+
+    <!-- Coordinator Server Machine Box (165px wide, clean solid dots) -->
+    <g transform="translate(200, 5)">
+      <!-- Outer Panel -->
+      <rect class="panel" x="0" y="0" width="165" height="120" rx="10"/>
+      <!-- Inner Clean Screen -->
+      <rect class="inner-box" x="8" y="8" width="149" height="104" rx="6"/>
+      
+      <!-- Solid Clean Status Lights (Zero halos) -->
+      <g transform="translate(18, 22)">
+        <circle cx="6" cy="6" r="5" fill="#d97706" class="dot-queued"/>
+        <text class="mono-text" x="20" y="10" fill="#d97706">QUEUED</text>
+      </g>
+      <g transform="translate(18, 46)">
+        <circle cx="6" cy="6" r="5" fill="#0284c7" class="dot-running"/>
+        <text class="mono-text" x="20" y="10" fill="#0284c7">RUNNING</text>
+      </g>
+      <g transform="translate(18, 70)">
+        <circle cx="6" cy="6" r="5" fill="#16a34a" class="dot-completed"/>
+        <text class="mono-text" x="20" y="10" fill="#16a34a">COMPLETED</text>
+      </g>
+      <g transform="translate(18, 94)">
+        <circle cx="6" cy="6" r="5" fill="#dc2626" class="dot-failed"/>
+        <text class="mono-text" x="20" y="10" fill="#dc2626">FAILED</text>
+      </g>
+    </g>
+
+    <!-- Wire: Coordinator down to Worker 1 -->
+    <path d="M230 130 C230 175, 140 180, 140 220" fill="none" stroke="#0284c7" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arrow-blue)"/>
+    <text class="note-text" x="180" y="175" text-anchor="middle" fill="#0284c7">assign lease</text>
+
+    <!-- Wire: Sweeper timeout & retry -->
+    <path d="M370 220 C370 175, 340 145, 310 130" fill="none" stroke="#d97706" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arrow-amber)"/>
+    <text class="note-text" x="390" y="170" text-anchor="middle" fill="#d97706">sweeper retry</text>
+  </g>
+
+  <!-- ==================== STAGE 3: WORKERS ==================== -->
+  <g id="stage-workers-label" transform="translate(540, 160)">
+    <circle cx="16" cy="16" r="14" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1.5"/>
+    <text class="title-text" x="16" y="21" text-anchor="middle" fill="#16a34a">3</text>
+    <text class="title-text" x="38" y="21">Workers</text>
+  </g>
+
+  <!-- Worker 1 Machine Unit -->
+  <g id="worker-1" transform="translate(425, 230)">
+    <rect class="panel" x="0" y="0" width="105" height="54" rx="8"/>
+    <text class="mono-text" x="52" y="22" text-anchor="middle" fill="#0f172a">WORKER 1</text>
+    
+    <!-- Clean Solid Indicator Dot (No expanding fuzzy circles) -->
+    <circle cx="88" cy="14" r="3.5" fill="#0284c7" class="dot-worker"/>
+    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="38" text-anchor="middle">heartbeat</text>
+
+    <!-- Animated Mechanical Gripper Arm -->
+    <g class="gripper-arm-1" transform="translate(46, 54)">
+      <rect x="4" y="0" width="5" height="16" fill="#64748b"/>
+      <path d="M-2 16 H15 M0 16 V24 M13 16 V24" stroke="#64748b" stroke-width="2" fill="none"/>
+    </g>
+  </g>
+
+  <!-- Worker 2 Machine Unit -->
+  <g id="worker-2" transform="translate(615, 230)">
+    <rect class="panel" x="0" y="0" width="105" height="54" rx="8"/>
+    <text class="mono-text" x="52" y="22" text-anchor="middle" fill="#0f172a">WORKER 2</text>
+    
+    <!-- Clean Solid Indicator Dot -->
+    <circle cx="88" cy="14" r="3.5" fill="#0284c7" class="dot-worker" style="animation-delay: -0.7s;"/>
+    <text font-family="-apple-system, sans-serif" font-size="9.5" font-weight="600" fill="#0284c7" x="52" y="38" text-anchor="middle">heartbeat</text>
+
+    <!-- Animated Mechanical Gripper Arm -->
+    <g class="gripper-arm-2" transform="translate(46, 54)">
+      <rect x="4" y="0" width="5" height="16" fill="#64748b"/>
+      <path d="M-2 16 H15 M0 16 V24 M13 16 V24" stroke="#64748b" stroke-width="2" fill="none"/>
+    </g>
+  </g>
+
+  <!-- ==================== STAGE 4: RESULT STORE ==================== -->
+  <g id="stage-result-store" transform="translate(890, 160)">
+    <!-- Stage Header Badge -->
+    <circle cx="16" cy="16" r="14" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1.5"/>
+    <text class="title-text" x="16" y="21" text-anchor="middle" fill="#16a34a">4</text>
+    <text class="title-text" x="38" y="21">Result store</text>
+
+    <!-- Vault Safe Box -->
+    <g transform="translate(0, 36)">
+      <rect class="panel" x="0" y="0" width="150" height="120" rx="10"/>
+      
+      <!-- Database Storage Cylinder -->
+      <path d="M35 24 V58 A40 10 0 0 0 115 58 V24" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+      <ellipse cx="75" cy="24" rx="40" ry="10" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <ellipse cx="75" cy="40" rx="40" ry="10" fill="none" stroke="#86efac" stroke-width="1.2"/>
+      
+      <text class="title-text" x="75" y="85" text-anchor="middle" font-size="13">RESULTS</text>
+      <text class="note-text" x="75" y="103" text-anchor="middle" fill="#16a34a">first result wins</text>
+    </g>
+
+    <!-- Status Outcome Badges (Padded 150px box, centered text, clean solid dots) -->
+    <g transform="translate(0, 170)">
+      <rect x="0" y="0" width="150" height="30" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.3"/>
+      <circle cx="18" cy="15" r="4.5" fill="#16a34a"/>
+      <text class="mono-text" x="80" y="19" text-anchor="middle" fill="#16a34a">COMPLETED</text>
+    </g>
+    <g transform="translate(0, 208)">
+      <rect x="0" y="0" width="150" height="30" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1.3"/>
+      <circle cx="18" cy="15" r="4.5" fill="#dc2626"/>
+      <text class="mono-text" x="80" y="19" text-anchor="middle" fill="#dc2626">FAILED (3 tries)</text>
+    </g>
+  </g>
+</svg>
