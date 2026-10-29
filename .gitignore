@@ -4,5 +4,9 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+tokens.json
+*.pem
+*.key
+*.crt
 outputs/*.txt
 !outputs/.gitkeep

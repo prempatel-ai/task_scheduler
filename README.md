@@ -1,6 +1,6 @@
 # Crash-Resilient Task Queue
 
-A minimal, crash-resilient task queue that guarantees every job reaches a terminal state (`completed` or `failed`) with exactly-once execution semantics for deterministic workloads.
+A minimal, crash-resilient task queue that guarantees every job reaches a terminal state (`completed` or `failed`) with exactly-once execution semantics for deterministic workloads, even under worker crashes, coordinator restarts, network partitions, and queue overload.
 
 ---
 
@@ -8,12 +8,12 @@ A minimal, crash-resilient task queue that guarantees every job reaches a termin
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Submit (idempotent key)
-    pending --> running: Worker claim (lease granted)
-    running --> running: Heartbeat (extends lease)
-    running --> completed: Complete (first result wins)
-    running --> pending: Lease expired (retry count < max_retries, backoff)
-    running --> failed: Lease expired (retry count >= max_retries)
+    [*] --> queued: POST /jobs (Idempotency-Key)
+    queued --> running: POST /claim (Lease granted)
+    running --> running: POST /jobs/{id}/heartbeat (Lease extended)
+    running --> completed: POST /jobs/{id}/complete (First result wins)
+    running --> queued: Lease expired / fail (Attempts < Max, Backoff delay)
+    running --> failed: Lease expired / fail (Attempts >= Max)
     completed --> [*]
     failed --> [*]
 ```
@@ -24,21 +24,47 @@ stateDiagram-v2
 
 | Failure Scenario | System Behavior & Invariant Guarantee |
 | :--- | :--- |
-| **Worker killed mid-execution** | Coordinator sweeper detects missing heartbeat / lease expiration. Requeues job with exponential backoff until max retries. |
-| **Worker killed after writing result, before ACK** | Subsequent worker rerun recomputes or validates result. Completion is idempotent; first completion wins. |
-| **Slow worker finishes after lease expiration** | New worker has claimed the job. Late worker's completion request is rejected as stale (fenced by lease/owner check). Result remains single and correct. |
-| **Coordinator crashes and restarts** | All state resides in SQLite on disk with WAL mode enabled. On restart, sweeper resumes inspection of active leases. |
-| **Duplicate job submissions** | Unique idempotency key returns existing job ID without creating a duplicate job. |
-| **Poison pill job (always crashes worker)** | Every claim increments the attempt counter. Job transitions to `failed` upon exceeding `max_retries` (default: 3). |
-| **Coordinator overload (high queue depth)** | API enforces queue depth limits and returns `429 Too Many Requests` (backpressure). |
+| **Worker killed mid-job (`CRASH_AT=mid_job`)** | Sweeper detects missing heartbeat / lease expiration. Requeues job with exponential backoff delay (`BASE * 2^attempts + jitter`). |
+| **Worker killed after computing before ACK (`CRASH_AT=after_compute_before_ack`)** | Job is requeued. Clean worker recomputes. Database sets `result` in atomic `UPDATE ... WHERE status IN ('queued', 'running')`. Only one result is stored. |
+| **Slow / Stalled worker (`HEARTBEAT=off`)** | Job lease expires and is claimed by Worker B. If Worker A later finishes and attempts to complete, the database rejects the stale completion (`updated: false`). First completion wins. |
+| **Coordinator killed (`kill -9`) & restarted** | Worker retries `/complete` across connection drops. Once coordinator restarts on the same SQLite database (WAL mode), the worker completes the job cleanly. |
+| **Duplicate job submissions** | Submitting the same `Idempotency-Key` returns existing `job_id` (`200 OK` on duplicates, `201 Created` on new jobs). Retries are never penalized. |
+| **Poison pill job (`always_crash`)** | Every claim increments `attempts`. Upon exceeding `max_attempts` (default 3), sweeper transitions status to `failed` with error message. |
+| **Queue overload (`MAX_QUEUE` reached)** | Returns `429 Too Many Requests` with `Retry-After: 5` for new keys. Existing idempotency keys bypass backpressure and return `200`. |
+| **Worker token mismatch / forgery** | Coordinator validates Bearer tokens via `hmac.compare_digest`. Valid token for `w1` used with worker ID `w2` returns `403 Forbidden`. |
+| **TLS / SSL MITM protection** | Coordinator serves over HTTPS with SAN certificate. Workers strictly verify server cert against `CA_CERT` (`verify=False` is never allowed). |
 
 ---
 
-## System Limits & Specifications
+## Security & Architecture
 
-- **Default Lease Duration**: 10 seconds
-- **Heartbeat Interval**: 3 seconds
-- **Max Retries**: 3
-- **Backoff Policy**: Exponential backoff between retries ($2^{\text{try}} \times \text{base\_delay}$)
-- **Backpressure**: Max pending jobs threshold triggers HTTP 429
-- **Storage**: SQLite (coordinator state) + filesystem/table (result store)
+- **HTTPS & TLS**: Coordinator binds on `0.0.0.0` with `--ssl-keyfile` and `--ssl-certfile`. Workers connect with `--ca-cert` verification.
+- **Worker Tokens**: Managed via `tokens.json` (mapped in `TOKENS_FILE`, ignored by git).
+- **Client Tokens**: Distinct `CLIENT_TOKEN` required for job submission and status polling; worker tokens cannot submit jobs.
+- **Result Storage**: Stored directly in `jobs.result` column (max 64 KB, larger payloads rejected with `413`).
+- **Clock Authority**: Coordinator clock decides all lease expiries; workers do not perform time comparisons.
+
+---
+
+## System Configuration & Limits
+
+| Environment Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `DB_PATH` | `jobs.db` | Path to SQLite database file |
+| `LEASE_SECS` | `30` | Duration of worker lease before expiration |
+| `SWEEP_SECS` | `2` | Interval for sweeper background thread |
+| `BASE_BACKOFF` | `2.0` | Base exponential retry delay in seconds |
+| `MAX_QUEUE` | `100` | Maximum queued jobs before triggering HTTP 429 |
+| `MAX_RESULT_BYTES` | `65536` | Maximum allowed result size (64 KB) |
+| `CLIENT_TOKEN` | - | Bearer token for client API operations |
+| `TOKENS_FILE` | `tokens.json` | JSON mapping of worker IDs to secret tokens |
+| `CA_CERT` | - | CA certificate path for worker TLS verification |
+
+---
+
+## Running the Automated Test Suite
+
+```powershell
+# Run all fault, authentication, database, and API tests
+pytest -v
+```

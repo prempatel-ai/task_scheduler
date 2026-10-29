@@ -1,7 +1,6 @@
 """Unit tests for coordinator database layer."""
 
 import os
-import sqlite3
 import sys
 import tempfile
 import threading

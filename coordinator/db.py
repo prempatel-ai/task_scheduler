@@ -1,7 +1,6 @@
-"""SQLite persistence layer: schema, claim, complete."""
+"""SQLite persistence layer: schema, atomic claim, complete, and sweeper."""
 
 import os
-import random
 import sqlite3
 import threading
 import time
@@ -9,10 +8,11 @@ from typing import Any, Dict, Optional, Tuple
 
 DEFAULT_DB_PATH = "jobs.db"
 _local = threading.local()
+_initialized_dbs = set()
 
 
 def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Returns a thread-local SQLite connection configured with WAL mode and busy timeout."""
+    """Returns a thread-local SQLite connection with PRAGMAs configured once."""
     if not hasattr(_local, "connections"):
         _local.connections = {}
     if db_path not in _local.connections:
@@ -21,7 +21,13 @@ def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
+        sync_mode = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
+        conn.execute(f"PRAGMA synchronous = {sync_mode};")
         _local.connections[db_path] = conn
+
+    # Auto-initialize schema once per db_path
+    if db_path not in _initialized_dbs:
+        init_db(db_path)
     return _local.connections[db_path]
 
 
@@ -33,15 +39,29 @@ def close_thread_connection(db_path: Optional[str] = None) -> None:
         conn = _local.connections.pop(db_path, None)
         if conn:
             conn.close()
+        _initialized_dbs.discard(db_path)
     else:
         for conn in _local.connections.values():
             conn.close()
         _local.connections.clear()
+        _initialized_dbs.clear()
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
-    """Initializes the jobs table and indexes if they do not exist."""
-    conn = get_connection(db_path)
+    """Initializes schema and partial indexes."""
+    if not hasattr(_local, "connections") or db_path not in _local.connections:
+        conn = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        sync_mode = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
+        conn.execute(f"PRAGMA synchronous = {sync_mode};")
+        if not hasattr(_local, "connections"):
+            _local.connections = {}
+        _local.connections[db_path] = conn
+    else:
+        conn = _local.connections[db_path]
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS jobs (
@@ -56,17 +76,34 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             lease_expires_at REAL,
             not_before REAL NOT NULL DEFAULT 0,
             error TEXT,
+            result TEXT,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
         );
         """
     )
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(jobs);")
+    cols = [r["name"] for r in cursor.fetchall()]
+    if "result" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN result TEXT;")
+
+    # Partial indexes tailored to query patterns
     conn.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_jobs_claim
-        ON jobs (status, not_before, id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_claim_partial
+        ON jobs (not_before, id)
+        WHERE status = 'queued';
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jobs_running_lease
+        ON jobs (lease_expires_at)
+        WHERE status = 'running';
+        """
+    )
+    _initialized_dbs.add(db_path)
 
 
 def create_job(
@@ -76,13 +113,8 @@ def create_job(
     now: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> Tuple[int, bool]:
-    """Inserts a job.
-
-    Returns (job_id, created) where created is True if newly inserted,
-    or False if idem_key already existed.
-    """
+    """Inserts a job. Returns (job_id, created)."""
     conn = get_connection(db_path)
-    init_db(db_path)
     if now is None:
         now = time.time()
     cursor = conn.cursor()
@@ -103,9 +135,8 @@ def create_job(
 
 
 def get_job(job_id: int, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
-    """Fetches a single job row by ID, or None if not found."""
+    """Fetches a single job row by ID."""
     conn = get_connection(db_path)
-    init_db(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM jobs WHERE id = ?;", (job_id,))
     row = cursor.fetchone()
@@ -113,9 +144,8 @@ def get_job(job_id: int, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, A
 
 
 def get_job_by_idem_key(idem_key: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
-    """Fetches a single job row by idempotency key, or None if not found."""
+    """Fetches a single job row by idempotency key."""
     conn = get_connection(db_path)
-    init_db(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM jobs WHERE idem_key = ?;", (idem_key,))
     row = cursor.fetchone()
@@ -123,9 +153,8 @@ def get_job_by_idem_key(idem_key: str, db_path: str = DEFAULT_DB_PATH) -> Option
 
 
 def get_queue_depth(db_path: str = DEFAULT_DB_PATH) -> int:
-    """Returns the number of currently queued jobs (excluding running)."""
+    """Returns number of queued jobs using partial index."""
     conn = get_connection(db_path)
-    init_db(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'queued';")
     return cursor.fetchone()["cnt"]
@@ -140,42 +169,19 @@ def claim_job(
     """Claims the oldest queued job in a single atomic transaction.
 
     WHY CLAIM IS A SINGLE TRANSACTION (BEGIN IMMEDIATE):
-    In a concurrent environment with multiple workers polling for tasks,
-    selecting the oldest queued job and updating its status to 'running'
-    must happen atomically.
-
-    Using BEGIN IMMEDIATE acquires a reserved write lock immediately at
-    the start of the transaction before any rows are read. This prevents
-    race conditions where two workers could execute the SELECT simultaneously,
-    receive the same queued job, and both attempt to claim it. With BEGIN
-    IMMEDIATE, only one worker can enter the claim block at any time;
-    concurrent callers wait via SQLite's busy handler and will see the updated
-    state once unblocked, ensuring each job is claimed exactly once.
+    Selecting the oldest queued job and updating status to 'running' must be atomic.
+    BEGIN IMMEDIATE acquires a write lock before any read, preventing two workers
+    from claiming the same row. SQLite >= 3.35 executes this in a single UPDATE RETURNING statement.
+    Attempts are incremented on claim, not on failure.
     """
     conn = get_connection(db_path)
-    init_db(db_path)
+    if now is None:
+        now = time.time()
+    lease_expires_at = now + lease_secs
 
     conn.execute("BEGIN IMMEDIATE;")
     try:
-        if now is None:
-            now = time.time()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT * FROM jobs
-            WHERE status = 'queued' AND not_before <= ?
-            ORDER BY id ASC
-            LIMIT 1;
-            """,
-            (now,),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            conn.execute("COMMIT;")
-            return None
-
-        job_id = row["id"]
-        lease_expires_at = now + lease_secs
         cursor.execute(
             """
             UPDATE jobs
@@ -184,15 +190,20 @@ def claim_job(
                 lease_owner = ?,
                 lease_expires_at = ?,
                 updated_at = ?
-            WHERE id = ?;
+            WHERE id = (
+                SELECT id FROM jobs
+                WHERE status = 'queued' AND not_before <= ?
+                ORDER BY id ASC
+                LIMIT 1
+            )
+            RETURNING id, idem_key, type, payload, status, attempts, max_attempts,
+                      lease_owner, lease_expires_at, not_before, error, created_at, updated_at;
             """,
-            (worker_id, lease_expires_at, now, job_id),
+            (worker_id, lease_expires_at, now, now),
         )
-
-        cursor.execute("SELECT * FROM jobs WHERE id = ?;", (job_id,))
-        updated_row = cursor.fetchone()
+        row = cursor.fetchone()
         conn.execute("COMMIT;")
-        return dict(updated_row)
+        return dict(row) if row else None
     except Exception:
         conn.execute("ROLLBACK;")
         raise
@@ -202,15 +213,15 @@ def complete_job(
     job_id: int,
     worker_id: Optional[str] = None,
     attempt: Optional[int] = None,
+    result: Optional[str] = None,
     now: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> bool:
-    """Marks a job as completed if it is currently queued or running.
+    """Marks job completed with result.
 
-    Returns True if a row was updated, False otherwise (e.g. if already completed).
+    First completion wins: WHERE status IN ('queued', 'running') ensures late completions are rejected.
     """
     conn = get_connection(db_path)
-    init_db(db_path)
     if now is None:
         now = time.time()
     cursor = conn.cursor()
@@ -218,10 +229,11 @@ def complete_job(
         """
         UPDATE jobs
         SET status = 'completed',
+            result = ?,
             updated_at = ?
         WHERE id = ? AND status IN ('queued', 'running');
         """,
-        (now, job_id),
+        (result, now, job_id),
     )
     return cursor.rowcount > 0
 
@@ -234,12 +246,8 @@ def heartbeat(
     now: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> bool:
-    """Extends lease_expires_at only if status is running, lease_owner matches,
-
-    and attempts equals attempt. Returns True if extended, False otherwise.
-    """
+    """Extends lease only if worker_id, attempt, and running status match."""
     conn = get_connection(db_path)
-    init_db(db_path)
     if now is None:
         now = time.time()
     new_expires = now + lease_secs
@@ -264,15 +272,8 @@ def requeue_expired(
     base_backoff: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> int:
-    """Requeues or fails expired running jobs in a single atomic transaction.
-
-    For each running job with lease_expires_at < now:
-    - If attempts >= max_attempts: set status='failed' and error='lease expired, max attempts'.
-    - Otherwise: set status='queued', clear lease fields, and set
-      not_before = now + base_backoff * 2^attempts + random jitter.
-    """
+    """Sweeps expired running jobs in two SQL statements without Python loops."""
     conn = get_connection(db_path)
-    init_db(db_path)
     if now is None:
         now = time.time()
     if base_backoff is None:
@@ -280,50 +281,39 @@ def requeue_expired(
 
     conn.execute("BEGIN IMMEDIATE;")
     try:
-        cursor = conn.cursor()
-        cursor.execute(
+        # Statement 1: Mark expired jobs at max_attempts as failed
+        failed_cnt = conn.execute(
             """
-            SELECT id, attempts, max_attempts
-            FROM jobs
-            WHERE status = 'running' AND lease_expires_at < ?;
+            UPDATE jobs
+            SET status = 'failed',
+                error = 'lease expired, max attempts',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE status = 'running'
+              AND lease_expires_at < ?
+              AND attempts >= max_attempts;
             """,
-            (now,),
-        )
-        expired_jobs = cursor.fetchall()
-        for job in expired_jobs:
-            job_id = job["id"]
-            attempts = job["attempts"]
-            max_attempts = job["max_attempts"]
-            if attempts >= max_attempts:
-                cursor.execute(
-                    """
-                    UPDATE jobs
-                    SET status = 'failed',
-                        error = 'lease expired, max attempts',
-                        lease_owner = NULL,
-                        lease_expires_at = NULL,
-                        updated_at = ?
-                    WHERE id = ?;
-                    """,
-                    (now, job_id),
-                )
-            else:
-                backoff = base_backoff * (2 ** attempts) + random.uniform(0.0, 0.5)
-                not_before = now + backoff
-                cursor.execute(
-                    """
-                    UPDATE jobs
-                    SET status = 'queued',
-                        lease_owner = NULL,
-                        lease_expires_at = NULL,
-                        not_before = ?,
-                        updated_at = ?
-                    WHERE id = ?;
-                    """,
-                    (not_before, now, job_id),
-                )
+            (now, now),
+        ).rowcount
+
+        # Statement 2: Requeue remaining expired jobs with backoff and jitter computed in SQL
+        requeued_cnt = conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'queued',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                not_before = ? + (? * (1 << attempts)) + (abs(random() % 500) / 1000.0),
+                updated_at = ?
+            WHERE status = 'running'
+              AND lease_expires_at < ?;
+            """,
+            (now, base_backoff, now, now),
+        ).rowcount
+
         conn.execute("COMMIT;")
-        return len(expired_jobs)
+        return failed_cnt + requeued_cnt
     except Exception:
         conn.execute("ROLLBACK;")
         raise
@@ -338,13 +328,8 @@ def fail_job(
     base_backoff: Optional[float] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> bool:
-    """Handles explicit job failure reported by a worker.
-
-    Only updates if status is running and attempts equals attempt.
-    Applies the same retry/fail path as lease expiration.
-    """
+    """Fails or requeues a running job using the shared retry/fail path."""
     conn = get_connection(db_path)
-    init_db(db_path)
     if now is None:
         now = time.time()
     if base_backoff is None:
@@ -352,53 +337,38 @@ def fail_job(
 
     conn.execute("BEGIN IMMEDIATE;")
     try:
-        cursor = conn.cursor()
-        cursor.execute(
+        failed = conn.execute(
             """
-            SELECT id, attempts, max_attempts
-            FROM jobs
-            WHERE id = ? AND status = 'running' AND attempts = ? AND lease_owner = ?;
+            UPDATE jobs
+            SET status = 'failed',
+                error = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE id = ? AND status = 'running' AND attempts = ? AND lease_owner = ?
+              AND attempts >= max_attempts;
             """,
-            (job_id, attempt, worker_id),
-        )
-        row = cursor.fetchone()
-        if not row:
-            conn.execute("COMMIT;")
-            return False
+            (error, now, job_id, attempt, worker_id),
+        ).rowcount
 
-        attempts = row["attempts"]
-        max_attempts = row["max_attempts"]
-        if attempts >= max_attempts:
-            cursor.execute(
-                """
-                UPDATE jobs
-                SET status = 'failed',
-                    error = ?,
-                    lease_owner = NULL,
-                    lease_expires_at = NULL,
-                    updated_at = ?
-                WHERE id = ?;
-                """,
-                (error, now, job_id),
-            )
-        else:
-            backoff = base_backoff * (2 ** attempts) + random.uniform(0.0, 0.5)
-            not_before = now + backoff
-            cursor.execute(
+        requeued = 0
+        if failed == 0:
+            requeued = conn.execute(
                 """
                 UPDATE jobs
                 SET status = 'queued',
                     error = ?,
                     lease_owner = NULL,
                     lease_expires_at = NULL,
-                    not_before = ?,
+                    not_before = ? + (? * (1 << attempts)) + (abs(random() % 500) / 1000.0),
                     updated_at = ?
-                WHERE id = ?;
+                WHERE id = ? AND status = 'running' AND attempts = ? AND lease_owner = ?;
                 """,
-                (error, not_before, now, job_id),
-            )
+                (error, now, base_backoff, now, job_id, attempt, worker_id),
+            ).rowcount
+
         conn.execute("COMMIT;")
-        return True
+        return (failed + requeued) > 0
     except Exception:
         conn.execute("ROLLBACK;")
         raise

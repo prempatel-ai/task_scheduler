@@ -1,12 +1,15 @@
-"""Coordinator service: API + background sweeper."""
+"""Coordinator service: API + background sweeper + auth + HTTPS."""
 
+import hmac
+import json
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from coordinator.db import (
@@ -22,10 +25,60 @@ from coordinator.db import (
     requeue_expired,
 )
 
+security = HTTPBearer(auto_error=False)
+
 
 def get_db_path() -> str:
     """Returns database path configured via environment variable."""
     return os.getenv("DB_PATH", "jobs.db")
+
+
+def get_tokens() -> Dict[str, str]:
+    """Loads worker token mappings from TOKENS_FILE."""
+    tokens_path = os.getenv("TOKENS_FILE")
+    if tokens_path and os.path.exists(tokens_path):
+        with open(tokens_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def verify_client_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Enforces client bearer authentication on job submit and read endpoints."""
+    expected = os.getenv("CLIENT_TOKEN")
+    if not expected:
+        return
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Missing client token")
+    if not hmac.compare_digest(credentials.credentials, expected):
+        raise HTTPException(status_code=401, detail="Invalid client token")
+
+
+def verify_worker_auth(
+    worker_id: str,
+    credentials: Optional[HTTPAuthorizationCredentials],
+):
+    """Enforces worker bearer authentication and matches token owner to worker_id."""
+    tokens = get_tokens()
+    if not tokens and not os.getenv("TOKENS_FILE"):
+        return
+
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Missing worker token")
+
+    token = credentials.credentials
+    matching_worker = None
+    for w_id, sec in tokens.items():
+        if hmac.compare_digest(sec, token):
+            matching_worker = w_id
+            break
+
+    if matching_worker is None:
+        raise HTTPException(status_code=401, detail="Invalid worker token")
+
+    if matching_worker != worker_id:
+        raise HTTPException(status_code=403, detail="Token does not belong to specified worker_id")
 
 
 def sweeper_loop(stop_event: threading.Event, sweep_secs: float, db_path: str):
@@ -73,6 +126,7 @@ class ClaimRequest(BaseModel):
 class CompleteJobRequest(BaseModel):
     worker_id: Optional[str] = None
     attempt: Optional[int] = None
+    result: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -86,7 +140,7 @@ class FailJobRequest(BaseModel):
     error: str
 
 
-@app.post("/jobs")
+@app.post("/jobs", dependencies=[Depends(verify_client_auth)])
 def create_job_endpoint(
     body: CreateJobRequest,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
@@ -125,7 +179,7 @@ def create_job_endpoint(
     return JSONResponse(status_code=status_code, content={"job_id": job_id})
 
 
-@app.get("/jobs/{id}")
+@app.get("/jobs/{id}", dependencies=[Depends(verify_client_auth)])
 def get_job_endpoint(id: int):
     """Returns full job row by ID, or 404 if missing."""
     job = get_job(id, db_path=get_db_path())
@@ -135,8 +189,13 @@ def get_job_endpoint(id: int):
 
 
 @app.post("/claim")
-def claim_endpoint(body: ClaimRequest):
+def claim_endpoint(
+    body: ClaimRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
     """Claims the oldest queued job. Returns 204 if queue is empty."""
+    verify_worker_auth(body.worker_id, credentials)
+
     lease_secs = float(os.getenv("LEASE_SECS", "30"))
     job = claim_job(worker_id=body.worker_id, lease_secs=lease_secs, db_path=get_db_path())
     if job is None:
@@ -146,8 +205,19 @@ def claim_endpoint(body: ClaimRequest):
 
 
 @app.post("/jobs/{id}/complete")
-def complete_endpoint(id: int, body: CompleteJobRequest):
-    """Marks a job completed. Returns 404 if missing, or {updated: bool}."""
+def complete_endpoint(
+    id: int,
+    body: CompleteJobRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Marks a job completed with its result. Returns 404 if missing, 413 if result is too large."""
+    if body.worker_id:
+        verify_worker_auth(body.worker_id, credentials)
+
+    max_result_bytes = int(os.getenv("MAX_RESULT_BYTES", "65536"))
+    if body.result is not None and len(body.result.encode("utf-8")) > max_result_bytes:
+        raise HTTPException(status_code=413, detail="Result payload exceeds maximum size")
+
     job = get_job(id, db_path=get_db_path())
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -156,14 +226,21 @@ def complete_endpoint(id: int, body: CompleteJobRequest):
         job_id=id,
         worker_id=body.worker_id,
         attempt=body.attempt,
+        result=body.result,
         db_path=get_db_path(),
     )
     return {"updated": updated}
 
 
 @app.post("/jobs/{id}/heartbeat")
-def heartbeat_endpoint(id: int, body: HeartbeatRequest):
+def heartbeat_endpoint(
+    id: int,
+    body: HeartbeatRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
     """Extends the lease of a running job."""
+    verify_worker_auth(body.worker_id, credentials)
+
     lease_secs = float(os.getenv("LEASE_SECS", "30"))
     extended = heartbeat(
         job_id=id,
@@ -176,8 +253,14 @@ def heartbeat_endpoint(id: int, body: HeartbeatRequest):
 
 
 @app.post("/jobs/{id}/fail")
-def fail_endpoint(id: int, body: FailJobRequest):
+def fail_endpoint(
+    id: int,
+    body: FailJobRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
     """Reports a job failure from a worker."""
+    verify_worker_auth(body.worker_id, credentials)
+
     failed = fail_job(
         job_id=id,
         worker_id=body.worker_id,

@@ -1,7 +1,6 @@
 """Tests for lease, heartbeat, sweeper, and crash recovery."""
 
 import os
-import random
 import socket
 import subprocess
 import sys
