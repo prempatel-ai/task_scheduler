@@ -1,37 +1,36 @@
-# Crash-resilient task queue
+<h1 align="center">Crash-resilient task queue</h1>
 
-A background task queue that coordinates work between an HTTP API and independent workers. It guarantees that every submitted job reaches either completed or failed, even when workers crash, networks drop, or the coordinator restarts.
+<p align="center">
+A job queue where every job ends as <code>completed</code> or <code>failed</code>,<br>
+even when a worker dies, the network drops, or the coordinator restarts.
+</p>
 
-Run it directly with Python 3:
+<p align="center">
+<a href="#quick-start">Quick start</a> ·
+<a href="#how-it-works">How it works</a> ·
+<a href="#what-happens-when-things-break">Failure tests</a> ·
+<a href="#design-decisions">Design decisions</a> ·
+<a href="#glossary">Glossary</a>
+</p>
 
-```bash
-uvicorn coordinator.main:app --port 8000
-python -m worker.worker --coordinator http://127.0.0.1:8000 --run-once
-```
+<p align="center">
+  <img src="assets/architecture.svg" alt="A client submits jobs to the coordinator. The coordinator keeps state in SQLite and runs a sweeper. Workers pull jobs from the coordinator." width="100%">
+</p>
 
----
+## The problem
 
-## Why this exists
+Slow work should not run inside a web request. So a client submits a job, a separate worker runs it, and a central coordinator keeps track of it.
 
-Applications need to run slow tasks outside web request cycles. A worker process claims a job, executes the work, and reports completion back to a central coordinator.
+The hard part is a silent worker. If a worker stops responding, the coordinator cannot tell whether it crashed or is just slow. Both look the same from outside. If the coordinator gives the job to a second worker, the job may run twice.
 
-Distributed systems face one core problem: a coordinator cannot distinguish between a worker that crashed and one that is running slowly over an interrupted network. Both look identical from the outside. If the coordinator assumes a silent worker is dead and hands the job to a second worker, both workers may run the same job. This system accepts that jobs may run more than once, but ensures through database constraints that only the first finished result is stored.
-
-## How it works in plain words
-
-Consider an example of processing 100 text files with two workers named Worker A and Worker B.
-
-A client submits 100 jobs to the coordinator over HTTP. Worker A claims job 1, receiving a temporary lease (a timed ownership pass). While processing file 1, Worker A periodically sends a heartbeat (a short ping message) to tell the coordinator that it is still alive. Worker B claims job 2 and does the same.
-
-At file 50, Worker A loses power. Its heartbeats stop. The coordinator runs a background sweeper thread that inspects the database. When Worker A's lease expires without a heartbeat, the sweeper resets job 50 back to queued status with a short delay. Worker B finishes its current file, requests work, claims job 50, and completes it.
-
-If Worker A comes back online and tries to submit results for job 50, the database rejects the submission because Worker B already completed the job. All 100 files finish with exactly one stored result per job.
+This project accepts that a job can run twice. It guarantees two things instead: only the first finished result is stored, and every job ends in a final state.
 
 ## Quick start
 
-Start the coordinator:
+Needs Python 3. Tested on 3.13.9.
 
 ```bash
+pip install -r requirements.txt
 uvicorn coordinator.main:app --port 8000
 ```
 
@@ -44,7 +43,6 @@ curl -X POST http://127.0.0.1:8000/jobs \
   -d '{"type": "count_words", "payload": "hello world"}'
 ```
 
-Output:
 ```json
 {"job_id":1}
 ```
@@ -55,180 +53,249 @@ Run a worker for one job:
 python -m worker.worker --coordinator http://127.0.0.1:8000 --run-once
 ```
 
-Output:
 ```text
 Worker worker-12548 complete response for job 1: updated=True
 ```
 
-Check the job status and stored result:
+Read the job back:
 
 ```bash
 curl http://127.0.0.1:8000/jobs/1
 ```
 
-Output:
 ```json
 {"id":1,"idem_key":"demo-key-1","type":"count_words","payload":"hello world","status":"completed","attempts":1,"max_attempts":3,"lease_owner":"worker-12548","lease_expires_at":1793258736.37,"not_before":1793258705.52,"error":null,"result":"2","created_at":1793258705.52,"updated_at":1793258706.38}
 ```
 
-## Job lifecycle
+With no tokens configured, the API is open. For a setup with tokens and HTTPS, see [Running with tokens and HTTPS](#running-with-tokens-and-https).
 
-```mermaid
-stateDiagram-v2
-    [*] --> queued: Submit (POST /jobs)
-    queued --> running: Claim (POST /claim)
-    running --> running: Heartbeat (POST /jobs/{id}/heartbeat)
-    running --> completed: Complete (POST /jobs/{id}/complete)
-    running --> queued: Lease expired or failed (attempts < max_attempts)
-    running --> failed: Lease expired or failed (attempts >= max_attempts)
-    completed --> [*]
-    failed --> [*]
-```
+## How it works
 
-A client posts a payload with an idempotency key, creating a [job](#glossary) in the `queued` state. An idle [worker](#glossary) calls `/claim` to claim the job, which advances the status to `running`, increments [attempt](#glossary), and sets an initial [lease](#glossary). While executing, the worker's background thread sends a [heartbeat](#glossary) to extend the lease deadline. When work finishes, the worker posts the result to `/complete`, which commits status `completed` in an atomic [transaction](#glossary). If the worker crashes or reports an error, the [sweeper](#glossary) evaluates the failure. If attempts are below `max_attempts`, the sweeper returns the job to `queued` with an exponential [retry and backoff](#glossary) delay plus random [jitter](#glossary). When attempts reach `max_attempts`, the sweeper sets status `failed`. The coordinator accepts only the first completion to commit, discarding late completions.
+Two workers share a pile of jobs. Here is what happens when one of them dies.
 
-## Failure scenarios
+1. A client submits jobs. Each one gets an ID and starts as `queued`.
+2. Worker A asks for work and gets job 50. It also gets a [lease](#glossary): a timed pass that says the job is A's until the time runs out.
+3. While it works, A sends [heartbeats](#glossary). Each one extends the lease.
+4. A loses power. The heartbeats stop.
+5. The lease runs out. A background thread, the [sweeper](#glossary), puts job 50 back in the queue after a short wait.
+6. Worker B claims job 50, finishes it, and sends the result. The coordinator stores it.
+7. A comes back and sends its own result, late. The coordinator ignores it, because job 50 is already `completed`.
 
-| Failure scenario | System behavior | Automated test |
+<p align="center">
+  <img src="assets/worker-failure.svg" alt="Sequence diagram. Worker A claims job 50 and sends a heartbeat, then loses power. The lease expires and the sweeper requeues the job. Worker B claims and completes it. Worker A's late result is ignored." width="100%">
+</p>
+
+Job 50 ran twice, and one result is stored. Two rules make that work:
+
+- Completion succeeds only once. The update applies only while the job is `queued` or `running`, so the first result wins.
+- The coordinator stores results itself, in the `jobs.result` column. A retry on any machine writes to the same place.
+
+### Job lifecycle
+
+<p align="center">
+  <img src="assets/job-lifecycle.svg" alt="State diagram. Jobs start queued, move to running on claim, and end completed or failed. A running job returns to queued when its lease expires and attempts remain." width="100%">
+</p>
+
+An [attempt](#glossary) is counted when a job is claimed, not when it fails. A job that crashes its worker still uses up an attempt, so a bad job cannot loop forever. After `max_attempts` (3 by default) the job becomes `failed`.
+
+### API
+
+| Endpoint | Called by | What it does |
 | :--- | :--- | :--- |
-| Worker killed mid-job | Sweeper detects expired lease, increments attempts, and requeues job with backoff. | `tests/test_faults.py::test_crash_mid_job` |
-| Worker killed after computation before ACK | Sweeper requeues job. Next worker re-runs handler and saves result. Database updates only if status is queued or running. | `tests/test_faults.py::test_crash_after_write_before_ack` |
-| Stalled worker with expired lease | Replacement worker claims job. When original worker completes later, coordinator rejects update with `updated: false`. | `tests/test_faults.py::test_slow_worker_heartbeat_off` |
-| Coordinator killed with SIGKILL and restarted | Worker catches network errors, pauses, and retries. Survives restart and completes job once database reopens. | `tests/test_faults.py::test_kill_coordinator_and_recover` |
-| Duplicate job submission | Coordinator checks unique database index and returns existing job ID with HTTP 200. | `tests/test_faults.py::test_submit_idempotency_key_twice` |
-| Handler always crashes | Each claim increments attempts counter. Sweeper transitions status to `failed` upon reaching `max_attempts`. | `tests/test_faults.py::test_always_crash_reaches_failed` |
-| Overloaded queue depth | New submissions return HTTP 429 with `Retry-After: 5`. Known idempotency keys return HTTP 200. | `tests/test_faults.py::test_backpressure_max_queue` |
-| Missing or bad worker token | Coordinator rejects request with HTTP 401 via constant-time token comparison. | `tests/test_auth.py::test_no_token_or_bad_token_on_worker_endpoint_returns_401` |
-| Worker token used with wrong worker ID | Coordinator rejects claim or completion with HTTP 403 because token does not match payload identity. | `tests/test_auth.py::test_valid_token_wrong_worker_id_returns_403` |
-| Worker token on client endpoints | Worker tokens cannot call `POST /jobs` or `GET /jobs/{id}` and receive HTTP 401. | `tests/test_auth.py::test_worker_token_on_client_endpoints_rejected` |
-| Worker connects with invalid CA certificate | Worker catches TLS error and retries without crashing or bypassing verification. | `tests/test_auth.py::test_wrong_ca_cert_worker_does_not_crash` |
+| `POST /jobs` | client | Submit a job. Needs an `Idempotency-Key` header. |
+| `GET /jobs/{id}` | client | Read status, attempts, and result. |
+| `POST /claim` | worker | Take the next queued job and start a lease. |
+| `POST /jobs/{id}/heartbeat` | worker | Extend the lease. |
+| `POST /jobs/{id}/complete` | worker | Report the result. Only the first one counts. |
+| `POST /jobs/{id}/fail` | worker | Report a handler error. The job is retried or marked `failed`. |
+
+## What happens when things break
+
+Each row has an automated test that creates the failure for real.
+
+| What breaks | What the system does | Test |
+| :--- | :--- | :--- |
+| Worker killed mid-job | The sweeper sees the expired lease, counts the attempt, and requeues the job with a backoff delay. | `tests/test_faults.py::test_crash_mid_job` |
+| Worker killed after computing, before reporting | The sweeper requeues the job. The next worker runs it again. The result is stored once, because completion only applies while the job is queued or running. | `tests/test_faults.py::test_crash_after_write_before_ack` |
+| Worker is slow, not dead | Its lease expires and another worker takes the job. When the slow worker finishes, the coordinator answers `updated: false`. | `tests/test_faults.py::test_slow_worker_heartbeat_off` |
+| Coordinator killed with SIGKILL, then restarted | Workers catch the network errors, wait, and retry. When the database reopens, the job completes once. | `tests/test_faults.py::test_kill_coordinator_and_recover` |
+| Same job submitted twice | A unique index on the idempotency key returns the existing job ID with HTTP 200. | `tests/test_faults.py::test_submit_idempotency_key_twice` |
+| Handler always crashes | Every claim uses up an attempt. At `max_attempts` the job becomes `failed`. | `tests/test_faults.py::test_always_crash_reaches_failed` |
+| Jobs arrive faster than workers finish | New submissions get HTTP 429 with `Retry-After: 5`. A key the system already knows gets HTTP 200. | `tests/test_faults.py::test_backpressure_max_queue` |
+| Missing or wrong worker token | HTTP 401. Tokens are compared in constant time. | `tests/test_auth.py::test_no_token_or_bad_token_on_worker_endpoint_returns_401` |
+| Worker token used with another worker's ID | HTTP 403. | `tests/test_auth.py::test_valid_token_wrong_worker_id_returns_403` |
+| Worker token used on client endpoints | HTTP 401. | `tests/test_auth.py::test_worker_token_on_client_endpoints_rejected` |
+| Worker has the wrong CA certificate | The worker logs the TLS error and retries. It does not crash and does not skip verification. | `tests/test_auth.py::test_wrong_ca_cert_worker_does_not_crash` |
 
 ## Design decisions
 
-Claim and lease:
-- Chosen: Single-statement `UPDATE ... RETURNING` in SQLite with a timed [lease](#glossary) and [heartbeat](#glossary) background thread.
-- Rejected: Two-step `SELECT` then `UPDATE`, and permanent worker assignments without leases.
-- Reason: Two-step queries cause race conditions without explicit transaction locks. Permanent assignment leaves jobs abandoned when workers crash. Timed leases allow automatic recovery.
+### Claim and lease
 
-Idempotency:
-- Chosen: Unique database constraint on `idem_key`. Submissions with existing keys return HTTP 200 with the existing job ID. Completion returns `updated: true` on the first commit and `updated: false` on repeats.
-- Rejected: In-memory hash sets and client-generated random IDs without database uniqueness.
-- Reason: In-memory structures disappear when the coordinator restarts. Database-backed keys prevent duplicate records across process lifecycles.
+- Chosen: a single `UPDATE ... RETURNING` statement in SQLite, a timed lease, and a heartbeat thread in the worker.
+- Rejected: a separate `SELECT` then `UPDATE`, and permanent job assignment with no lease.
+- Why: with two steps, two workers can read the same row before either writes. Permanent assignment strands a job when its worker dies. A lease lets the system recover on its own.
 
-Retries:
-- Chosen: Exponential delay ($BASE \times 2^{attempts} + jitter$) calculated in SQL with an attempt cap (`max_attempts`).
-- Rejected: Immediate retries and fixed retry intervals handled in application loops.
-- Reason: Immediate retries overload failing downstream services. Computing backoff and jitter directly in SQL avoids pulling rows into Python memory.
+### Idempotency
 
-Backpressure:
-- Chosen: Count only `queued` jobs against `MAX_QUEUE`. Return HTTP 429 with `Retry-After: 5` on new keys, but allow existing keys to return HTTP 200.
-- Rejected: Counting `running` jobs toward the queue limit, or rejecting retries of known idempotency keys.
-- Reason: Running jobs are actively being processed, not waiting in line. Rejecting known keys would punish clients for retrying dropped network connections.
+- Chosen: a unique constraint on `idem_key`. Submitting a known key returns the existing job. `complete` returns `updated: true` the first time and `updated: false` after that.
+- Rejected: an in-memory set of seen keys, and random client-generated IDs with no database check.
+- Why: memory is lost when the coordinator restarts. A database constraint holds across restarts.
 
-Storage:
-- Chosen: SQLite with [WAL](#glossary) mode, `PRAGMA synchronous = NORMAL`, and thread-local connections. Results stored directly in the `jobs.result` column.
-- Rejected: External database servers and storing job results only on the local worker filesystem.
-- Reason: SQLite requires no external server process. Storing results in SQLite allows workers on separate machines to write back to a central store.
+### Retries
 
-Authentication:
-- Chosen: Shared secret tokens stored in a JSON file and checked with `hmac.compare_digest`. Client and worker roles use separate tokens. Network traffic runs over HTTPS.
-- Rejected: Mutual TLS (mTLS) with client certificates and single shared passwords for all endpoints.
-- Reason: Constant-time comparison prevents timing attacks without the overhead of maintaining a client certificate authority. Role separation stops workers from submitting arbitrary jobs.
+- Chosen: exponential backoff (`BASE_BACKOFF * 2^attempts`) plus random jitter, computed in SQL, with a cap at `max_attempts`.
+- Rejected: instant retries, and fixed intervals handled in a Python loop.
+- Why: instant retries hit a failing service again and again. Doing the math in SQL means rows never have to be pulled into Python.
+
+### Backpressure
+
+- Chosen: only `queued` jobs count toward `MAX_QUEUE`. A new key over the limit gets HTTP 429 with `Retry-After: 5`. A known key still gets HTTP 200.
+- Rejected: counting `running` jobs toward the limit, and rejecting retries of known keys.
+- Why: a running job is being worked on, not waiting. A client that retries after a dropped connection should not be punished for it.
+
+### Storage
+
+- Chosen: SQLite in [WAL](#glossary) mode with `PRAGMA synchronous = NORMAL` and one connection per thread. Results live in the `jobs.result` column.
+- Rejected: a separate database server, and result files on each worker's local disk.
+- Why: SQLite needs no extra process. Results in the database mean a worker on another machine can report back to one central store.
+
+### Authentication
+
+- Chosen: bearer tokens from a JSON file, checked with `hmac.compare_digest`. Workers and clients use different tokens. Traffic runs over HTTPS.
+- Rejected: mutual TLS, and one shared password for every endpoint.
+- Why: tokens need no client certificate authority. Separate roles stop a worker from submitting jobs.
 
 ## Configuration
 
-| Environment variable | Default | Meaning |
+<details>
+<summary>Environment variables</summary>
+
+<br>
+
+| Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `DB_PATH` | `jobs.db` | File path to SQLite database |
-| `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite disk synchronization mode |
-| `SWEEP_SECS` | `2` | Seconds between sweeper checks for expired leases |
-| `LEASE_SECS` | `30` | Seconds granted to a worker on claim or heartbeat |
-| `BASE_BACKOFF` | `2.0` | Base delay in seconds multiplied by $2^{attempts}$ for retries |
-| `MAX_QUEUE` | `100` | Maximum queued jobs before coordinator returns HTTP 429 |
-| `MAX_RESULT_BYTES` | `65536` | Maximum allowed size in bytes for a job result (64 KB) |
-| `TOKENS_FILE` | None | File path to JSON dictionary of worker tokens |
-| `CLIENT_TOKEN` | None | Secret bearer token required for client endpoints |
-| `COORDINATOR_URL` | `http://127.0.0.1:8000` | Coordinator base URL for worker connections |
-| `WORKER_ID` | `worker-<pid>` | Worker identifier string sent in claim and heartbeat payloads |
-| `WORKER_TOKEN` | None | Bearer token sent by worker in Authorization header |
-| `CA_CERT` | None | File path to CA certificate for TLS verification |
-| `HEARTBEAT` | `on` | Set to `off` to disable worker heartbeat thread |
-| `CRASH_AT` | None | Fault injection point (`after_claim`, `mid_job`, `after_compute_before_ack`) |
-| `OUTPUTS_DIR` | `outputs` | Directory where file handlers write local copies |
-| `JOB_SLEEP` | `10` | Sleep duration in seconds for sleep handler |
-| `CLAIM_LOG` | None | File path where worker appends claim latency timings |
+| `DB_PATH` | `jobs.db` | Path to the SQLite database |
+| `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite disk sync mode |
+| `SWEEP_SECS` | `2` | Seconds between sweeper runs |
+| `LEASE_SECS` | `30` | Seconds a worker gets on claim or heartbeat |
+| `BASE_BACKOFF` | `2.0` | Base retry delay in seconds, multiplied by 2^attempts |
+| `MAX_QUEUE` | `100` | Queued jobs allowed before the API returns 429 |
+| `MAX_RESULT_BYTES` | `65536` | Largest result accepted (64 KB) |
+| `TOKENS_FILE` | none | Path to a JSON file of worker tokens |
+| `CLIENT_TOKEN` | none | Bearer token required on client endpoints |
+| `COORDINATOR_URL` | `http://127.0.0.1:8000` | Where workers find the coordinator |
+| `WORKER_ID` | `worker-<pid>` | Worker name sent in claim and heartbeat requests |
+| `WORKER_TOKEN` | none | Bearer token the worker sends |
+| `CA_CERT` | none | Path to the CA certificate used to verify TLS |
+| `HEARTBEAT` | `on` | Set to `off` to stop the worker heartbeat thread |
+| `CRASH_AT` | none | Fault injection point: `after_claim`, `mid_job`, or `after_compute_before_ack` |
+| `OUTPUTS_DIR` | `outputs` | Folder where handlers write local copies |
+| `JOB_SLEEP` | `10` | Seconds the sleep handler waits |
+| `CLAIM_LOG` | none | File where the worker appends claim timings |
 
-## Running the tests
+</details>
 
-Run the test suite with pytest:
+### Running with tokens and HTTPS
+
+Make a self-signed certificate. The address in `subjectAltName` must match the address workers connect to.
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+  -days 30 -subj "/CN=coordinator" -addext "subjectAltName=IP:<coordinator-ip>"
+```
+
+Create `tokens.json`, one entry per worker:
+
+```json
+{"w1": "<long-random-string>"}
+```
+
+Start the coordinator:
+
+```bash
+TOKENS_FILE=tokens.json CLIENT_TOKEN=<client-secret> \
+  uvicorn coordinator.main:app --host 0.0.0.0 --port 8443 \
+  --ssl-keyfile key.pem --ssl-certfile cert.pem
+```
+
+Start a worker on the other machine. Copy `cert.pem` to it first.
+
+```bash
+COORDINATOR_URL=https://<coordinator-ip>:8443 WORKER_ID=w1 \
+WORKER_TOKEN=<token-for-w1> CA_CERT=cert.pem \
+  python -m worker.worker
+```
+
+A token only works with its own worker ID. Keep `tokens.json` and `*.pem` out of git.
+
+## Tests
 
 ```bash
 pytest -v
 ```
 
-All 31 automated tests passed on Python 3.13.9 in 65.35 seconds.
+Last full run: 31 tests passed in 65.35 s on Python 3.13.9. The fault tests start real coordinator and worker processes and kill them mid-job.
 
 ## Performance
 
-Full profiling records, query execution plans, and benchmarks are recorded in [PERF.md](PERF.md).
+Measured with `scripts/bench.py`: 500 jobs, 2 workers, `JOB_SLEEP=0`, on Windows with SQLite 3.51.0. Query plans and profiling notes are in [PERF.md](PERF.md).
 
-Benchmarks were measured with `scripts/bench.py` on Windows using SQLite 3.51.0, processing 500 jobs across 2 workers with `JOB_SLEEP=0`.
-
-| Metric | Baseline before optimization | Optimized after optimization | Change |
+| Metric | Before | After | Change |
 | :--- | :--- | :--- | :--- |
-| Throughput | 65.5 jobs/s | 139.8 jobs/s | +113% speedup (2.13x faster) |
-| Duration | 7.64 s | 3.58 s | -53.1% elapsed time |
-| Claim latency p50 | 2.76 ms | 1.91 ms | -30.8% latency reduction |
-| Claim latency p95 | 14.39 ms | 15.65 ms | Stable under doubled throughput |
-| Non-test source lines | 1030 lines | 998 lines | -32 lines reduced |
+| Throughput | 65.5 jobs/s | 139.8 jobs/s | 2.13x |
+| Total time | 7.64 s | 3.58 s | -53.1% |
+| Claim latency, p50 | 2.76 ms | 1.91 ms | -30.8% |
+| Claim latency, p95 | 14.39 ms | 15.65 ms | +8.8% (slightly worse) |
+| Non-test source lines | 1030 | 998 | -32 |
 
 ## Limits
 
-- **Warning:** Outside side effects cannot be rolled back. The system provides [at-least-once delivery](#glossary). If a job triggers an external side effect like charging a payment or sending an email before crashing, that outside action cannot be undone by the database.
-- Single coordinator: The coordinator runs as a single process. It does not provide multi-node coordinator failover.
-- Single-writer SQLite: SQLite allows concurrent readers in WAL mode, but only one write transaction at a time. Throughput is limited by SQLite write lock contention.
-- Self-signed certificates: The provided TLS setup generates local self-signed certificates and does not handle automated public certificate authority renewal.
+> [!WARNING]
+> Delivery is at-least-once. A job can run twice. If a job sends an email or charges a card before its worker crashes, the database cannot undo that. A handler that touches the outside world must be safe to run twice.
+
+- One coordinator process. There is no failover.
+- SQLite allows one writer at a time. WAL mode lets readers continue, but write throughput is capped by that lock.
+- The TLS setup uses self-signed certificates. There is no automatic renewal.
 
 ## Glossary
 
-- job: A discrete unit of work defined by an ID, type, and payload (for example, job 1 with type count_words and payload "hello").
-- coordinator: The central HTTP service managing the job database, API requests, leases, and sweeper.
-- worker: An independent process that polls the coordinator, claims jobs, executes handlers, and reports results.
-- lease: A timed reservation granted by the coordinator to a worker, preventing other workers from claiming the same job until the deadline passes.
-- heartbeat: A periodic HTTP request sent by a working worker to extend its lease expiration before the coordinator considers it dead.
-- sweeper: A background thread on the coordinator that periodically scans the database for expired leases and requeues or fails them.
-- claim: An atomic database operation where a worker acquires an available queued job and receives a lease.
-- attempt: A counter tracking how many times a job has been claimed or retried.
-- retry and backoff: A recovery policy that delays re-running a failed job, multiplying the wait time exponentially after each failed attempt.
-- jitter: A random delay added to the retry backoff to stop multiple workers from retrying simultaneously.
-- idempotency: A property where performing an operation multiple times produces the exact same outcome as running it once.
-- at-least-once delivery: A guarantee that every job will be processed to completion, even if a failure causes it to be executed more than once.
-- backpressure: A flow-control mechanism where the coordinator rejects new submissions with HTTP 429 when queue depth exceeds MAX_QUEUE.
-- transaction: A group of database operations that execute as an atomic all-or-nothing unit.
-- WAL: Write-Ahead Logging, an SQLite mode where writes append to a separate log file, allowing concurrent reads while writes take place.
-- bearer token: A security string passed in the HTTP Authorization header proving the caller has permission to act as a worker or client.
-- TLS: Transport Layer Security, cryptographic protocol providing encrypted HTTPS communication between workers and the coordinator.
+- **job**: one unit of work, with an ID, a type, and a payload. Example: job 1, type `count_words`, payload `"hello world"`.
+- **coordinator**: the central service. It owns the API, the database, the leases, and the sweeper.
+- **worker**: a separate process that asks the coordinator for jobs, runs them, and reports results.
+- **claim**: the atomic step where a worker takes a queued job and receives a lease.
+- **lease**: a timed claim on a job. No other worker can take the job until the lease expires.
+- **heartbeat**: a short request a working worker sends to extend its lease.
+- **sweeper**: a background thread in the coordinator that finds expired leases and requeues or fails those jobs.
+- **attempt**: a count of how many times a job has been claimed.
+- **retry and backoff**: after a failure, the job waits before it runs again. The wait doubles with each attempt.
+- **jitter**: a small random amount added to the backoff, so retries do not all land at the same moment.
+- **idempotency**: doing something twice has the same effect as doing it once. Submitting the same key twice creates one job.
+- **at-least-once delivery**: every job is run at least once, and sometimes twice.
+- **backpressure**: the system pushes back on clients when jobs arrive faster than workers finish them. Here that means HTTP 429.
+- **transaction**: a group of database steps that all happen or none do.
+- **WAL**: write-ahead logging, an SQLite mode where readers are not blocked by a writer.
+- **bearer token**: a secret string sent in the `Authorization` header to prove who is calling.
+- **TLS**: the encryption behind HTTPS.
+
+## Project layout
+
+```text
+coordinator/   HTTP API, database access, sweeper
+worker/        worker loop, heartbeat, job handlers
+tests/         fault tests and auth tests
+scripts/       bench.py
+assets/        diagrams used in this README
+PERF.md        benchmark notes
+```
 
 ## Future work (not built)
 
-- Multiple coordinators with PostgreSQL and SKIP LOCKED
-  - Why: Remove the single-coordinator availability bottleneck and single-writer disk lock.
-  - Design change: Replace SQLite connection logic with PostgreSQL connection pools and query queues with `FOR UPDATE SKIP LOCKED`.
-- Job cancellation endpoint
-  - Why: Allow clients to abort long-running or obsolete jobs before or during execution.
-  - Design change: Add `DELETE /jobs/{id}` or `POST /jobs/{id}/cancel`, update status to `canceled`, and make heartbeat responses instruct workers to stop.
-- Priority queues and scheduled jobs
-  - Why: Enable urgent jobs to jump the queue and allow jobs to run at specific future timestamps.
-  - Design change: Add a `priority` integer column and sort claims by `priority DESC, not_before ASC, id ASC`.
-- Metrics endpoint for Prometheus
-  - Why: Monitor queue depth, failure rates, and claim latency over time in production.
-  - Design change: Add `GET /metrics` exposing counter and histogram metrics without requiring SQLite queries on every scrape.
-- Inspection endpoint for failed jobs
-  - Why: Help operators inspect error traces and manually retry poisoned jobs without database access.
-  - Design change: Add `GET /jobs?status=failed` and `POST /jobs/{id}/retry` to reset attempts to zero.
-- Large result offloading to object storage
-  - Why: Prevent database bloat when job results exceed 64 KB.
-  - Design change: Workers upload large outputs to S3 or Google Cloud Storage and store only the resulting URI in `jobs.result`.
-- Mutual TLS and token rotation
-  - Why: Authenticate workers at the transport layer and rotate secrets without restarting the coordinator.
-  - Design change: Configure uvicorn with client CA validation and add file-watch reloading for worker token files.
+Nothing below exists yet.
+
+- **Several coordinators on PostgreSQL.** Removes the single coordinator and the single-writer limit. Claim would use `FOR UPDATE SKIP LOCKED` instead of SQLite's single-statement update.
+- **Job cancellation.** Lets a client stop a job that is no longer needed. Adds a `canceled` state, and heartbeat replies would tell the worker to stop.
+- **Priorities and scheduled jobs.** Lets urgent jobs go first and others run at a set time. Adds a `priority` column and changes the claim order.
+- **Metrics endpoint.** Shows queue depth, failure count, and claim latency over time. Adds `GET /metrics`.
+- **Failed job inspection.** Lets someone read errors and retry a failed job by hand. Adds `GET /jobs?status=failed` and `POST /jobs/{id}/retry`.
+- **Large results in object storage.** Keeps the database small when results pass 64 KB. Workers upload the result and the database stores a link.
+- **Mutual TLS and token rotation.** Authenticates workers at the connection level and changes secrets without a restart.
